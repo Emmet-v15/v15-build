@@ -84,15 +84,23 @@ jobs:
         run: bash builder/scripts/source.sh deps
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src
+          workspaces: src/${{ steps.src.outputs.dir }}
           key: ${{ inputs.repo }}
       - name: fetch
+        env:
+          DIR: ${{ steps.src.outputs.dir }}
         run: bash builder/scripts/fetch.sh
+      # ops/build.json "tools", once fetch.sh has removed the keys
+      - uses: ilammy/setup-nasm@v1
+        if: steps.src.outputs.nasm == 'true'
       - name: check
+        env:
+          DIR: ${{ steps.src.outputs.dir }}
         run: bash builder/scripts/check.sh
       - name: release exe
         if: inputs.build != ''
         env:
+          DIR: ${{ steps.src.outputs.dir }}
           V15_BUILD_ID: ${{ inputs.build }}
         run: bash builder/scripts/release.sh
       - name: encrypt

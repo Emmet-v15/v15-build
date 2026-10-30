@@ -5,8 +5,9 @@
 set -euo pipefail
 cd src
 
-if [ -f Cargo.lock ]; then
-  cargo fetch --locked > ../fetch.log 2>&1 || { grep -E "error|failed|denied" ../fetch.log | head -20; exit 1; }
+# DIR: the Cargo workspace's folder (ops/build.json "dir", from source.sh)
+if [ -f "${DIR:-.}/Cargo.lock" ]; then
+  (cd "${DIR:-.}" && cargo fetch --locked) > ../fetch.log 2>&1 || { grep -E "error|failed|denied" ../fetch.log | head -20; exit 1; }
 fi
 
 rm -rf "$RUNNER_TEMP/keys" ~/.ssh/config

@@ -3,8 +3,9 @@
 # only the key it needs (a step reading every secret would leak them all):
 #
 #   source.sh names   checks REPO and REF, names the app's secrets
-#   source.sh app     with KEY: clones the app (REPO at REF) into src/, and
-#                     names the secrets of its ops/build.json "deps" (≤ 4)
+#   source.sh app     with KEY: clones the app (REPO at REF) into src/,
+#                     names the secrets of its ops/build.json "deps" (≤ 4),
+#                     and outputs its "dir" and "tools"
 #   source.sh deps    with D1..D4 (repos) and K1..K4 (their keys)
 #
 # Each key gets its own ssh host alias, ensuring the correct key maps to
@@ -48,7 +49,14 @@ case "${1:-}" in
     git -C src checkout -q "$REF"
     echo "$REPO at $(git -C src rev-parse --short HEAD)"
     n=0
+    dir=.
     if [ -f src/ops/build.json ]; then
+      dir=$(jq -r '.dir // "."' src/ops/build.json | tr -d '\r')
+      case "/$dir/" in *[!A-Za-z0-9._/-]* | */../* | //*) echo "dir: a folder inside the repository"; exit 1 ;; esac
+      [ -f "src/$dir/Cargo.toml" ] || { echo "dir: no Cargo.toml in $dir"; exit 1; }
+      for tool in $(jq -r '.tools[]? // empty' src/ops/build.json | tr -d '\r'); do
+        case "$tool" in nasm) echo "nasm=true" >> "$GITHUB_OUTPUT" ;; *) echo "tools: unknown $tool"; exit 1 ;; esac
+      done
       for dep in $(jq -r '.deps[]? // empty' src/ops/build.json | tr -d '\r'); do
         valid "$dep" || { echo "deps: a repository name under Emmet-v15: $dep"; exit 1; }
         [ "$dep" != "$REPO" ] || continue
@@ -57,6 +65,7 @@ case "${1:-}" in
         { echo "d$n=$dep"; echo "k$n=KEY_$(id "$dep")"; } >> "$GITHUB_OUTPUT"
       done
     fi
+    echo "dir=$dir" >> "$GITHUB_OUTPUT"
     ;;
   deps)
     for i in 1 2 3 4; do
