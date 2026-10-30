@@ -1,0 +1,94 @@
+name: build
+
+# Checks and builds the owner's private app repositories on a free Windows
+# runner, as private repositories' own Actions minutes incur a charge. Each
+# repository (the app and its private dependencies, such as v15-kit or
+# v15-notify) is fetched using its own read-only deploy key, secret
+# KEY_<REPO>; these keys are deleted before any of the app's code executes.
+# The release exe is encrypted with ARTIFACT_<REPO> and retained for one
+# day; it is signed on the owner's machine, not here.
+#
+# Starts occur only through workflow_dispatch, invoked from
+# scripts/dispatch.sh. No pull request triggers execution, preventing
+# external code from accessing keys. Since logs are public, steps output
+# only error lines.
+
+run-name: ${{ inputs.repo }} ${{ inputs.ref }}${{ inputs.build != '' && ' release' || '' }} ${{ inputs.nonce }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: the app's repository under Emmet-v15
+        required: true
+      ref:
+        description: its commit (or branch)
+        default: main
+      build:
+        description: build id for a release exe (empty, check only)
+        default: ''
+      nonce:
+        description: set by scripts/dispatch.sh to find its run
+        default: ''
+
+permissions:
+  contents: read
+
+# one release at a time per app; checks run in parallel
+concurrency:
+  group: ${{ inputs.repo }}-${{ inputs.build != '' && 'release' || inputs.nonce }}
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_TERM_QUIET: 'true'
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Defender off (a throwaway runner)
+        shell: pwsh
+        run: |
+          try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch { "Defender stays on" }
+      - uses: actions/checkout@v5
+        with:
+          path: builder
+      - name: source
+        id: src
+        env:
+          SECRETS: ${{ toJSON(secrets) }}
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+        run: bash builder/scripts/source.sh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: ${{ inputs.repo }}
+      - name: fetch
+        run: bash builder/scripts/fetch.sh
+      - name: check
+        run: bash builder/scripts/check.sh
+      - name: release exe
+        if: inputs.build != ''
+        env:
+          V15_BUILD_ID: ${{ inputs.build }}
+        run: bash builder/scripts/release.sh
+      - name: encrypt
+        if: inputs.build != ''
+        working-directory: out
+        env:
+          K: ${{ secrets[steps.src.outputs.artifact] }}
+        run: |
+          [ -n "$K" ] || { echo "no ${{ steps.src.outputs.artifact }} secret: scripts/artifact-key.sh"; exit 1; }
+          for f in *; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
+      - uses: actions/upload-artifact@v4
+        if: inputs.build != ''
+        with:
+          name: windows
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
