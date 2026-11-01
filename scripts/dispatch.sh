@@ -28,11 +28,22 @@ _v15_jobs() {
     -q '.jobs[] | [.name, (.conclusion // ""), ([.steps[]? | select(.conclusion == "failure") | .name][0] // "")] | @tsv' | tr -d '\r'
 }
 
-# steps that fail due to the app (its checks, its build) or its
-# configuration are the app's responsibility; any other failures (setup,
-# fetching, a lost runner) are the infrastructure's responsibility
+# Steps that fail due to the app itself—such as its checks, its build, or
+# encrypting its files—differ from other failures (like setup, fetching,
+# or a lost runner), which may be infrastructure-related and are cheap to
+# retry.
 _v15_app_step() {
-  case "$1" in names | plan | source | mask | dependencies | keychain | check | release | encrypt) return 0 ;; esac
+  case "$1" in check | release | encrypt) return 0 ;; esac
+  return 1
+}
+
+# gh, up to three times: the owner's connection drops occasionally
+_v15_gh() {
+  local n
+  for n in 1 2 3; do
+    gh "$@" && return 0
+    [ "$n" = 3 ] || sleep $((n * 10))
+  done
   return 1
 }
 
@@ -42,7 +53,7 @@ v15_build() {
   # The build cache is saved exclusively from main's commits and
   # releases.
   [ "$(git rev-parse -q --verify origin/main 2>/dev/null)" = "$sha" ] && cache=true
-  gh workflow run build.yml --repo "$V15_BUILDER" ${V15_BUILDER_REF:+--ref "$V15_BUILDER_REF"} \
+  _v15_gh workflow run build.yml --repo "$V15_BUILDER" ${V15_BUILDER_REF:+--ref "$V15_BUILDER_REF"} \
     -f repo="$repo" -f ref="$sha" -f build="$build" -f platforms="$platforms" -f cache="$cache" -f nonce="$nonce" > /dev/null || return 1
   V15_RUN=""
   for _ in $(seq 1 30); do
@@ -68,7 +79,7 @@ v15_build() {
         if [ "$infra" = 1 ] && [ "$retried" = 0 ]; then
           retried=1
           echo "run $V15_RUN: the infrastructure failed ($status), its failed jobs once more"
-          gh run rerun "$V15_RUN" --repo "$V15_BUILDER" --failed > /dev/null || return 1
+          _v15_gh run rerun "$V15_RUN" --repo "$V15_BUILDER" --failed > /dev/null || return 1
           sleep 10
           continue
         fi
@@ -93,25 +104,32 @@ v15_build() {
 
 v15_build_sums() {
   local run="$1" platform="$2" job
-  job=$(gh run view "$run" --repo "$V15_BUILDER" --json jobs -q ".jobs[] | select(.name == \"$platform\") | .databaseId" | tr -d '\r' | tail -1)
+  job=$(_v15_gh run view "$run" --repo "$V15_BUILDER" --json jobs -q ".jobs[] | select(.name == \"$platform\") | .databaseId" | tr -d '\r' | tail -1)
   [ -n "$job" ] || return 1
-  gh run view "$run" --repo "$V15_BUILDER" --job "$job" --log 2>/dev/null | grep -oE 'v15-sum [0-9a-f]{64} [0-9]+ [A-Za-z0-9._-]+$' | sed 's/^v15-sum //'
+  _v15_gh run view "$run" --repo "$V15_BUILDER" --job "$job" --log 2>/dev/null | grep -oE 'v15-sum [0-9a-f]{64} [0-9]+ [A-Za-z0-9._-]+$' | sed 's/^v15-sum //'
 }
 
 v15_build_has() {
   local n
-  n=$(gh api "repos/$V15_BUILDER/actions/runs/$1/artifacts" -q "[.artifacts[] | select(.name == \"$2\" and (.expired | not))] | length" 2>/dev/null | tr -d '\r')
+  n=$(_v15_gh api "repos/$V15_BUILDER/actions/runs/$1/artifacts" -q "[.artifacts[] | select(.name == \"$2\" and (.expired | not))] | length" 2>/dev/null | tr -d '\r')
   [ "${n:-0}" -gt 0 ]
 }
 
 v15_build_fetch() {
-  local run="$1" dir="$2" key="$3" p f sums sum size name got
+  local run="$1" dir="$2" key="$3" p f n sums sum size name got
   shift 3
   [ $# -gt 0 ] || set -- windows
   mkdir -p "$dir"
   for p in "$@"; do
     sums=$(v15_build_sums "$run" "$p")
-    gh run download "$run" --repo "$V15_BUILDER" -n "$p" -D "$dir" || return 1
+    [ -n "$sums" ] || { echo "$p: no v15-sum lines in run $run's log"; return 1; }
+    # (a download cut short is started again from scratch)
+    for n in 1 2 3; do
+      rm -f "$dir"/*.enc
+      gh run download "$run" --repo "$V15_BUILDER" -n "$p" -D "$dir" && break
+      [ "$n" = 3 ] && return 1
+      sleep $((n * 10))
+    done
     for f in "$dir"/*.enc; do
       [ -e "$f" ] || continue
       openssl enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -in "$f" -out "${f%.enc}" -pass "file:$key" && rm "$f" || return 1
