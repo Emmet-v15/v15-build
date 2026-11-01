@@ -115,6 +115,10 @@ v15_build_has() {
   [ "${n:-0}" -gt 0 ]
 }
 
+v15_path() {
+  if command -v cygpath > /dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 v15_build_fetch() {
   local run="$1" dir="$2" key="$3" p f n sums sum size name got
   shift 3
@@ -132,7 +136,10 @@ v15_build_fetch() {
     done
     for f in "$dir"/*.enc; do
       [ -e "$f" ] || continue
-      openssl enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -in "$f" -out "${f%.enc}" -pass "file:$key" && rm "$f" || return 1
+      # A native Windows openssl found first on PATH cannot open paths like /c/...; provide
+      # it with paths like C:/... instead.
+      openssl enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -in "$(v15_path "$f")" -out "$(v15_path "${f%.enc}")" \
+        -pass "file:$(v15_path "$key")" && rm "$f" || return 1
     done
     # each file as the run built it
     while read -r sum size name; do
