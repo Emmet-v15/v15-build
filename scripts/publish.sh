@@ -105,9 +105,13 @@ warn=()
 problem() { problems+=("$1"); }
 command -v gh > /dev/null && gh auth status > /dev/null 2>&1 || problem "gh is not signed in: gh auth login"
 command -v v15-release > /dev/null || problem "no v15-release: cargo install --git https://github.com/Emmet-v15/v15-kit v15-release"
-# (signing from the builder's hashes: v15-kit 0.6.4's v15-release)
-command -v v15-release > /dev/null && { v15-release add --help 2>/dev/null | grep -q -- --br-size; } \
-  || problem "v15-release can't sign from hashes: cargo install --git https://github.com/Emmet-v15/v15-kit v15-release --force"
+# Signing from the builder's hashes needs a v15-release with add --sha256; an
+# older one signs the downloaded exe, as before.
+SIGN_HASH=0
+if command -v v15-release > /dev/null && v15-release add --help 2>/dev/null | grep -q -- --br-size; then SIGN_HASH=1
+elif command -v v15-release > /dev/null; then
+  warn+=("v15-release can't sign from the builder's hashes, so the exe comes down: cargo install --path ../v15-kit/crates/v15-release --force")
+fi
 command -v openssl > /dev/null || problem "no openssl (Git Bash has one)"
 [ -n "$PLATFORMS" ] || problem "\"release\" names no platform (windows, linux, macos, ios, android)"
 case "$PUBKEY" in *[!0-9a-f]* | "") problem "release.pubkey: the 64 hex digits the app compiles in" ;; esac
@@ -259,6 +263,7 @@ else
     stay=0
     { [ "$FROM_BUILDER" = 1 ] || [ "$DRY" = 1 ]; } && stay=1
     [ "$p" = android ] && [ -n "$APK" ] && stay=0
+    [ "$p" = windows ] && [ -n "$EXE" ] && [ "$SIGN_HASH" = 0 ] && stay=0
     if [ "$stay" = 1 ]; then
       v15_build_sums "$r" "$p" > "$WORK/sums-$p" && [ -s "$WORK/sums-$p" ] || { rm -f "$WORK/sums-$p"; die "$p: no v15-sum lines in run $r's log"; }
       # (a run from before the builder packed the exe's .br: downloaded, as before)

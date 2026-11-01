@@ -15,7 +15,8 @@ names is read only by the step that needs it; no step sees every secret
 (GitHub would then hold every run for approval). Because logs are public,
 steps output only error lines. Release files are encrypted with the app's
 key, kept for one day, and their sha256 and size are printed in the log
-(`v15-sum` lines) so a build can be compared without downloading it. Runner
+(`v15-sum` lines), so a build is signed and compared without downloading it.
+A Windows exe also gets its brotli copy, `<exe>.br`, made on the runner. Runner
 images and actions are pinned (images by name, actions by commit).
 
 ## An app
@@ -145,7 +146,7 @@ cover everything:
 | `windows`, `linux`, `macos`, `ios`, `android` | For each platform, the `files` (built by the builder; on Windows, the first one is the exe installed by the kit's updater, served at `url`, defaulting to `<site>/<file>`, with its `.br`) and the `link`, whose download link is at the site root (installed by the release-pull config) |
 | `android.sign` | `{"keystore": "…", "password": "…", "alias": "…"}`: The unsigned APK is signed here using zipalign and apksigner; the keystore remains on this machine. |
 | `manifest`, `base` | the signed manifest's asset name (default `manifest.json`) and the live manifest it extends (default `<site>/manifest.json`) |
-| `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `V15_KEY` (the update key's file), `REMOTE`), such as an older manifest; files from a dry run left on the builder have their `v15-sum` lines in `$V15_OUT/../sums-<platform>` |
+| `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `V15_KEY` (the update key's file), `REMOTE`), such as an older manifest; files left on the builder (all but the APK) are not in `$V15_OUT`: their `v15-sum` lines are in `$V15_OUT/../sums-<platform>` |
 | `pull` | Release-pull configurations, one per release, starting with the app's own; the default is the first of `ops/<app>.json`, `<dir>/ops/<app>.json`, and `ops/release-pull/<app>.json`. A release contains only its configuration's assets and their `SHA256SUMS`. The first release must be complete, whereas a subsequent release (such as star's desktop packages) proceeds once it is ready. |
 
 The app stores a single-line `scripts/publish.sh`:
@@ -164,24 +165,38 @@ exec bash "$(dirname "$0")/../../v15-build/scripts/publish.sh" "$(dirname "$0")/
    each release-pull config (identical to the repo's); for Android, the keystore and the SDK's
    apksigner are present.
 2. **Build**: Execute one run on the builder per platform, including checks and generating a
-   build id (unix time). Files signed here (the exe, the APK) are downloaded, decrypted, and
-   verified against the run's `v15-sum` lines.
-3. **Sign**: Sign the APK with the keystore; add the exe to the live manifest (`v15-release add`,
-   with its `.br`), then `v15-release verify` verifies that installing the live build would
-   update to this one.
-4. **Release**: Create a GitHub release for each release-pull config, then run the server's
-   `release-pull`, which installs files in the config's order (manifests last) and fetches each
-   served file back to verify its hash there, so nothing is downloaded locally for checking. The
-   five newest releases are retained.
+   build id (unix time). The built files stay there: their sha256 and size are read from the
+   run's `v15-sum` lines. Only the unsigned APK comes down (decrypted and checked against those
+   lines), because the keystore never leaves this PC.
+3. **Sign**: Sign the APK with the keystore; sign the exe into the live manifest from its hashes
+   (`v15-release add --sha256 --size --br-size`: the signed message is app, platform, build,
+   size and sha256, the same as signing the file), then `v15-release verify` checks that
+   installing the live build would update to this one and that the manifest names the run's
+   exe.
+4. **Release**: Create a small GitHub release for each release-pull config, holding only what
+   was made here (manifests, the app's extra files, the signed APK) and `SHA256SUMS`, which
+   lists the builder's files by the run's hashes. Then run the server's
+   `release-pull <config> <tag> --from <run>/<platform> ...`, sent the gh token and the artifact
+   key on stdin: it fetches the release and the run's encrypted files from GitHub, decrypts them
+   (the key is never stored there), checks each against `SHA256SUMS` and the signed manifest,
+   installs files in the config's order (manifests last), and fetches each served file back to
+   verify its hash there. It keeps the newest five builds' files for
+   `release-pull <config> --rollback <tag>` (`--kept` lists them). The five newest GitHub
+   releases are retained, as the record of what shipped.
 
-`DRY=1` halts after signing; files not requiring signing remain on the
-builder, with their hashes sourced from the log. `BUILD=<id>` resumes a
+Nothing large crosses this PC's connection except an APK (star's, doomsday's: about 17 MB down
+and 17 MB up). Until the server's release-pull is the version that can fetch from the builder
+(preflight warns), the files come down and go up in the release as before.
+
+`DRY=1` halts after signing, with every file but the APK still on the
+builder. `BUILD=<id>` resumes a
 build by skipping any completed steps (built, signed, on GitHub,
-installed), ensuring that a mid-failure is retried rather than rebuilt.
-`LOCAL=1` builds on this PC instead (for Windows and Android, using the
+installed), ensuring that a mid-failure is retried rather than rebuilt;
+the builder's files expire after a day, and a platform built again is
+signed again. `LOCAL=1` builds on this PC instead (for Windows and Android, using the
 same cargo command and features or the same build commands, subject to the
-RAM rule) to handle a GitHub outage or billing block; the release is signed
-and published identically. Work is stored in `state/release/<build>/`
+RAM rule) to handle a GitHub outage or billing block; those files go up in
+the GitHub release, as before. Work is stored in `state/release/<build>/`
 (keeping the newest 3).
 
 ## Keys
