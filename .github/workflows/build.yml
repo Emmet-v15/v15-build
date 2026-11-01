@@ -1,17 +1,23 @@
 name: build
 
-# Checks and builds the owner's private app repositories on a free Windows
-# runner, as private repositories' own Actions minutes incur a charge. Each
-# repository (the app and its private dependencies, such as v15-kit or
-# v15-notify) is fetched using its own read-only deploy key, secret
-# KEY_<REPO>; these keys are deleted before any of the app's code executes.
-# The release exe is encrypted with ARTIFACT_<REPO> and retained for one
-# day; it is signed on the owner's machine, not here.
+# Builds the owner's private GitHub app repositories on free runners
+# (Windows, Linux, macOS, iOS, Android) to avoid charges for private
+# repository Actions minutes. Each repository—including the app, private
+# dependencies like v15-kit or v15-notify, and any extra checkouts specified
+# in ops/build.json—is fetched using its own read-only deploy key, secret
+# KEY_<REPO>. These keys are deleted before any app code executes. Other app
+# secrets are named in ops/build.json and read as <NAME>_<REPO> by the
+# specific step requiring them, so no step sees every secret. Release files
+# are encrypted with ARTIFACT_<REPO> and retained for one day; they are
+# signed on the owner's machine, not here.
 #
 # Starts occur only through workflow_dispatch, invoked from
 # scripts/dispatch.sh. No pull request triggers execution, preventing
 # external code from accessing keys. Since logs are public, steps output
 # only error lines.
+#
+# Because each action is pinned to a commit and each runner to an image, new
+# releases of either never alter a build without request.
 
 run-name: ${{ inputs.repo }} ${{ inputs.ref }}${{ inputs.build != '' && ' release' || '' }} ${{ inputs.nonce }}
 
@@ -25,8 +31,14 @@ on:
         description: its commit (or branch)
         default: main
       build:
-        description: build id for a release exe (empty, check only)
+        description: build id for a release (empty, check only)
         default: ''
+      platforms:
+        description: platforms to run, comma separated (empty, all of the app's)
+        default: ''
+      cache:
+        description: save the build cache (main's commits and releases)
+        default: 'false'
       nonce:
         description: set by scripts/dispatch.sh to find its run
         default: ''
@@ -42,22 +54,62 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_TERM_QUIET: 'true'
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_NET_RETRY: '10'
+  npm_config_fetch_retries: '5'
+  HOMEBREW_NO_AUTO_UPDATE: '1'
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  # Reads the app's ops/build.json: which platforms run, and on what.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: builder
+          persist-credentials: false
+      - name: names
+        id: names
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+        run: bash builder/scripts/source.sh names
+      - name: plan
+        id: plan
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+          PLATFORMS: ${{ inputs.platforms }}
+          KEY: ${{ secrets[steps.names.outputs.key] }}
+        run: bash builder/scripts/source.sh plan
+
+  build:
+    needs: plan
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
         shell: bash
+    env:
+      PLATFORM: ${{ matrix.platform }}
     steps:
       - name: Defender off (a throwaway runner)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop } catch { "Defender stays on" }
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: builder
-      # each step gets only the key it needs, never every secret
+          persist-credentials: false
+      # each step gets only the secrets it needs, never every secret
       - name: names
         id: names
         env:
@@ -71,6 +123,14 @@ jobs:
           REF: ${{ inputs.ref }}
           KEY: ${{ secrets[steps.names.outputs.key] }}
         run: bash builder/scripts/source.sh app
+      # ops/build.json "mask": values excluded from the public log in every
+      # case
+      - name: mask
+        if: steps.src.outputs.m1 != ''
+        env:
+          M1: ${{ secrets[steps.src.outputs.m1] }}
+          M2: ${{ steps.src.outputs.m2 && secrets[steps.src.outputs.m2] || '' }}
+        run: bash builder/scripts/source.sh mask
       - name: dependencies
         env:
           D1: ${{ steps.src.outputs.d1 }}
@@ -82,27 +142,98 @@ jobs:
           K3: ${{ steps.src.outputs.k3 && secrets[steps.src.outputs.k3] || '' }}
           K4: ${{ steps.src.outputs.k4 && secrets[steps.src.outputs.k4] || '' }}
         run: bash builder/scripts/source.sh deps
-      - uses: Swatinem/rust-cache@v2
+      # ops/build.json "checkouts": other private repositories beside the
+      # app, each with its own key, which is not kept
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: steps.src.outputs.c1_path != ''
         with:
-          workspaces: src/${{ steps.src.outputs.dir }}
-          key: ${{ inputs.repo }}
+          repository: ${{ steps.src.outputs.c1_repo || secrets[steps.src.outputs.c1_repo_secret] }}
+          ssh-key: ${{ secrets[steps.src.outputs.c1_key] }}
+          ref: ${{ steps.src.outputs.c1_ref }}
+          path: ${{ steps.src.outputs.c1_path }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: steps.src.outputs.c2_path != ''
+        with:
+          repository: ${{ steps.src.outputs.c2_repo || secrets[steps.src.outputs.c2_repo_secret] }}
+          ssh-key: ${{ secrets[steps.src.outputs.c2_key] }}
+          ref: ${{ steps.src.outputs.c2_ref }}
+          path: ${{ steps.src.outputs.c2_path }}
+          fetch-depth: 0
+          persist-credentials: false
+      # ops/build.json "tools", "targets", "apt", "brew" (no app code runs here)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        if: steps.src.outputs.node != ''
+        with:
+          node-version: ${{ steps.src.outputs.node }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        if: steps.src.outputs.java != ''
+        with:
+          distribution: temurin
+          java-version: ${{ steps.src.outputs.java }}
+      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
+        if: steps.src.outputs.nasm == 'true'
+      - name: tools
+        if: steps.src.outputs.legacy != 'true'
+        env:
+          DIR: ${{ steps.src.outputs.dir }}
+          TARGETS: ${{ steps.src.outputs.targets }}
+          APT: ${{ steps.src.outputs.apt }}
+          BREW: ${{ steps.src.outputs.brew }}
+          ANDROID: ${{ steps.src.outputs.android }}
+          XCODE: ${{ steps.src.outputs.xcode }}
+        run: bash builder/scripts/tools.sh
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: ${{ steps.src.outputs.workspaces }}
+          key: ${{ inputs.repo }}-${{ matrix.platform }}
+          save-if: ${{ inputs.build != '' || inputs.cache == 'true' }}
       - name: fetch
         env:
           DIR: ${{ steps.src.outputs.dir }}
         run: bash builder/scripts/fetch.sh
-      # ops/build.json "tools", once fetch.sh has removed the keys
-      - uses: ilammy/setup-nasm@v1
-        if: steps.src.outputs.nasm == 'true'
+      # ops/build.json "keychain" (macOS): the app's signing certificate, in a
+      # keychain exclusive to this runner.
+      - name: keychain
+        if: steps.src.outputs.kc_cert != ''
+        env:
+          CERT: ${{ secrets[steps.src.outputs.kc_cert] }}
+          PW: ${{ secrets[steps.src.outputs.kc_password] }}
+          IDENTITY: ${{ steps.src.outputs.kc_identity }}
+        run: bash builder/scripts/keychain.sh
       - name: check
         env:
           DIR: ${{ steps.src.outputs.dir }}
-        run: bash builder/scripts/check.sh
-      - name: release exe
+          LEGACY: ${{ steps.src.outputs.legacy }}
+          N1: ${{ steps.src.outputs.n1 }}
+          N2: ${{ steps.src.outputs.n2 }}
+          N3: ${{ steps.src.outputs.n3 }}
+          N4: ${{ steps.src.outputs.n4 }}
+          S1: ${{ steps.src.outputs.s1 && secrets[steps.src.outputs.s1] || '' }}
+          S2: ${{ steps.src.outputs.s2 && secrets[steps.src.outputs.s2] || '' }}
+          S3: ${{ steps.src.outputs.s3 && secrets[steps.src.outputs.s3] || '' }}
+          S4: ${{ steps.src.outputs.s4 && secrets[steps.src.outputs.s4] || '' }}
+        run: |
+          if [ "$LEGACY" = true ]; then bash builder/scripts/check.sh; else bash builder/scripts/run.sh check; fi
+      - name: release
         if: inputs.build != ''
         env:
           DIR: ${{ steps.src.outputs.dir }}
+          LEGACY: ${{ steps.src.outputs.legacy }}
           V15_BUILD_ID: ${{ inputs.build }}
-        run: bash builder/scripts/release.sh
+          N1: ${{ steps.src.outputs.n1 }}
+          N2: ${{ steps.src.outputs.n2 }}
+          N3: ${{ steps.src.outputs.n3 }}
+          N4: ${{ steps.src.outputs.n4 }}
+          S1: ${{ steps.src.outputs.s1 && secrets[steps.src.outputs.s1] || '' }}
+          S2: ${{ steps.src.outputs.s2 && secrets[steps.src.outputs.s2] || '' }}
+          S3: ${{ steps.src.outputs.s3 && secrets[steps.src.outputs.s3] || '' }}
+          S4: ${{ steps.src.outputs.s4 && secrets[steps.src.outputs.s4] || '' }}
+        run: |
+          if [ "$LEGACY" = true ]; then bash builder/scripts/release.sh; else bash builder/scripts/run.sh build; fi
+      # Each file's SHA256 and size are recorded in the log (v15-sum lines),
+      # allowing a build to be compared without downloading it.
       - name: encrypt
         if: inputs.build != ''
         working-directory: out
@@ -110,11 +241,14 @@ jobs:
           K: ${{ secrets[steps.names.outputs.artifact] }}
         run: |
           [ -n "$K" ] || { echo "no ${{ steps.names.outputs.artifact }} secret: scripts/artifact-key.sh"; exit 1; }
-          for f in *; do openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"; done
-      - uses: actions/upload-artifact@v4
+          for f in *; do
+            echo "v15-sum $(openssl dgst -sha256 -r "$f" | cut -d' ' -f1) $(wc -c < "$f" | tr -d ' ') $f"
+            openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: inputs.build != ''
         with:
-          name: windows
+          name: ${{ matrix.platform }}
           path: out/*
           retention-days: 1
           if-no-files-found: error
