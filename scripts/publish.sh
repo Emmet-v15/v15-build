@@ -80,7 +80,12 @@ for p in $PLATFORMS_ALL; do
   [ -z "$ONLY" ] || case " $ONLY " in *" $p "*) ;; *) continue ;; esac
   PLATFORMS="$PLATFORMS $p"
 done
-PULLS=$(cfg "c.release.pull || ['ops/' + c.release.app + '.json']")
+PULLS=$(cfg "c.release.pull || []")
+if [ -z "$PULLS" ]; then
+  # the first of ops/<app>.json, <dir>/ops/<app>.json, ops/release-pull/<app>.json
+  for f in "ops/$APP.json" "$DIR/ops/$APP.json" "ops/release-pull/$APP.json"; do [ -f "$f" ] && { PULLS=$f; break; }; done
+  [ -n "$PULLS" ] || PULLS="ops/$APP.json"
+fi
 files_of() { cfg "(c.release.$1.files || [])"; }
 EXE=$(files_of windows | head -1)
 EXE_URL=$(cfg 'c.release.windows && c.release.windows.url || ""')

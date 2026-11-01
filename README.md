@@ -121,9 +121,10 @@ workflow from a branch.
 
 ## A release
 
-The `release` section and the app's release-pull config (defaulting to
-`ops/<app>.json`, installed on the server as `/etc/release-pull/<app>.json`
-using v15-kit's `ops/release-pull/install.sh`) cover everything:
+The `release` section and the app's release-pull config (`ops/<app>.json`
+by default, see `pull`; installed on the server as
+`/etc/release-pull/<app>.json` via v15-kit's `ops/release-pull/install.sh`)
+cover everything:
 
 ```json
 "release": {
@@ -144,7 +145,7 @@ using v15-kit's `ops/release-pull/install.sh`) cover everything:
 | `android.sign` | `{"keystore": "…", "password": "…", "alias": "…"}`: The unsigned APK is signed here using zipalign and apksigner; the keystore remains on this machine. |
 | `manifest`, `base` | the signed manifest's asset name (default `manifest.json`) and the live manifest it extends (default `<site>/manifest.json`) |
 | `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `REMOTE`), e.g. an older manifest |
-| `pull` | Release-pull configurations, one per release, starting with the app's own; default is `["ops/<app>.json"]`. A release contains only its configuration's assets and their `SHA256SUMS`; the first must be complete, while a later one (such as star's desktop packages) proceeds once it is ready. |
+| `pull` | Release-pull configurations, one per release, starting with the app's own; the default is the first of `ops/<app>.json`, `<dir>/ops/<app>.json`, and `ops/release-pull/<app>.json`. A release contains only its configuration's assets and their `SHA256SUMS`. The first release must be complete, whereas a subsequent release (such as star's desktop packages) proceeds once it is ready. |
 
 The app stores a single-line `scripts/publish.sh`:
 
