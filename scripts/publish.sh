@@ -13,14 +13,23 @@
 #              platforms this PC can't build wait for a later run
 #   BUILD=<id> resume that build: whatever already happened (built, signed,
 #              released on GitHub, installed) is skipped
+#   PLATFORMS="windows android"  build only these this time (a release
+#              needing another platform's files waits)
 #   NOTES=...  the release notes the app shows
+# Exit status 0 means everything was released (or, in DRY mode, was ready).
+# Status 3 indicates the app's own release proceeded (or was ready in DRY
+# mode), but a subsequent release is pending; use BUILD=<id> to resume it. Any
+# other status indicates failure.
 #   REMOTE=... the server with release-pull (default empire)
 #
 # Requires gh signed in, node, openssl, v15-release (v15-kit), and ssh to
-# REMOTE. Also requires the app's state/ directory (which is gitignored; a
-# worktree uses its main checkout's state/), containing update-signing.pem
-# (the update key) and build-artifacts.key (the builder's encryption key,
-# scripts/artifact-key.sh).
+# REMOTE. It also needs the app's state/ directory (gitignored; a worktree
+# uses its main checkout's state/), which contains update-signing.pem (the
+# update key) and build-artifacts.key (the builder's encryption key,
+# scripts/artifact-key.sh). The entire script is read before execution ({ ...
+# } to the end), so pulling v15-build during a release cannot alter the
+# running instance.
+{
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=dispatch.sh
@@ -64,8 +73,13 @@ BASE=$(cfg 'c.release.base || ""')
 PACKAGE=$(cfg 'c.release.package || c.package || ""')
 DIR=$(cfg 'c.dir || "."')
 REPO=$(git remote get-url origin | sed -E 's#\.git$##; s#.*[/:]##')
+ONLY=$(echo "${PLATFORMS:-}" | tr ',' ' ')
 PLATFORMS=""
-for p in $PLATFORMS_ALL; do [ -n "$(cfg "c.release.$p && 'y'")" ] && PLATFORMS="$PLATFORMS $p"; done
+for p in $PLATFORMS_ALL; do
+  [ -n "$(cfg "c.release.$p && 'y'")" ] || continue
+  [ -z "$ONLY" ] || case " $ONLY " in *" $p "*) ;; *) continue ;; esac
+  PLATFORMS="$PLATFORMS $p"
+done
 PULLS=$(cfg "c.release.pull || ['ops/' + c.release.app + '.json']")
 files_of() { cfg "(c.release.$1.files || [])"; }
 EXE=$(files_of windows | head -1)
@@ -94,6 +108,9 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 PUSH=0
 if [ "$SHA" != "$(git rev-parse origin/main)" ]; then
   if [ "$BRANCH" = main ] && git merge-base --is-ancestor origin/main HEAD; then PUSH=1
+  elif [ "$DRY" = 1 ] && [ -n "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
+    # (a dry run may try a pushed branch; a release is main's)
+    warn+=("HEAD (${SHA::7}, $BRANCH) is not main: a dry run only")
   else problem "HEAD (${SHA::7}, $BRANCH) is not main as GitHub has it: release from main (git switch main; git pull)"; fi
 fi
 [ -z "$(git status --porcelain --untracked-files=no)" ] || problem "uncommitted changes would not be in it: commit or stash them"
@@ -221,12 +238,15 @@ if [ -n "$APK" ] && [ -f "$FILES/$APK" ] && [ ! -f "$FILES/$APK.unsigned" ]; the
   say "android: signing $APK with $(basename "$ks") (alias $ksalias)"
   mv "$FILES/$APK" "$FILES/$APK.unsigned"
   "$zipalign" -f -p 4 "$FILES/$APK.unsigned" "$FILES/$APK.aligned" > /dev/null
-  "$apksigner" sign --ks "$ks" --ks-key-alias "$ksalias" --ks-pass "file:$kspw" --key-pass "file:$kspw" \
+  # (pass the password via the environment: apksigner reads the file only up to the line
+  # break)
+  V15_KS_PASS=$(tr -d '\r\n' < "$kspw") "$apksigner" sign --ks "$ks" --ks-key-alias "$ksalias" \
+    --ks-pass env:V15_KS_PASS --key-pass env:V15_KS_PASS \
     --out "$FILES/$APK" "$FILES/$APK.aligned" || { mv "$FILES/$APK.unsigned" "$FILES/$APK"; die "android: signing failed"; }
   rm -f "$FILES/$APK.aligned" "$FILES/$APK.idsig"
 fi
 if [ -n "$APK" ] && [ -f "$FILES/$APK" ]; then
-  cert=$("$apksigner" verify --print-certs "$FILES/$APK" 2>/dev/null | grep -m1 "SHA-256 digest" | sed 's/.*: //' | tr -d '')
+  cert=$("$apksigner" verify --print-certs "$FILES/$APK" 2>/dev/null | grep -m1 "SHA-256 digest" | sed 's/.*: //' | tr -d '\r')
   [ -n "$cert" ] || die "android: $APK doesn't verify"
   say "android: $APK signed, certificate SHA-256 $cert"
 fi
@@ -243,7 +263,8 @@ if [ -n "$EXE" ] && [ -f "$FILES/$EXE" ] && [ ! -f "$FILES/$MANIFEST" ]; then
 fi
 if [ -n "$EXE" ] && [ -f "$FILES/$MANIFEST" ]; then
   # what an install of the live build would update to: this one
-  prev=$(curl -fsS --max-time 30 "$BASE" 2>/dev/null | node -e 'try{const m=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(m.latest||0)}catch{console.log(0)}' | tr -d '\r')
+  # (no live manifest yet: a first release)
+  prev=$({ curl -fsS --max-time 30 "$BASE" 2>/dev/null || true; } | node -e 'try{const m=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(m.latest||0)}catch{console.log(0)}' | tr -d '\r')
   [ -n "$prev" ] && [ "$prev" != "$BUILD" ] && [ "$prev" -lt "$BUILD" ] || prev=$((BUILD - 1))
   v15-release verify --manifest "$FILES/$MANIFEST" --app "$APP" --platform windows-x86_64 \
     --pubkey "$PUBKEY" --current "$prev" --file "$FILES/$EXE" > "$WORK/verify.log" 2>&1 \
@@ -267,7 +288,7 @@ ready=""
 waiting=""
 for pull in $PULLS; do
   name=$(pull_name "$pull")
-  assets=$(j "$pull" 'c.files.map(f => f.asset)')
+  assets=$(j "$pull" '[...new Set(c.files.map(f => f.asset))]')
   missing=""
   remote=""
   for a in $assets; do
@@ -276,6 +297,7 @@ for pull in $PULLS; do
     missing="$missing $a"
   done
   if [ -n "$missing" ]; then
+    [ "$pull" != "$(echo "$PULLS" | head -1)" ] || die "$name, the app's own release, is not ready: missing$missing"
     waiting="$waiting $name"
     say "$name: not ready, missing$missing"
     continue
@@ -297,7 +319,7 @@ done
 
 if [ "$DRY" = 1 ]; then
   say "dry run: build $BUILD built and signed in $WORK, nothing released"
-  [ -z "$waiting" ] || die "not ready:$waiting"
+  [ -z "$waiting" ] || { say "waiting:$waiting (BUILD=$BUILD resumes it)"; exit 3; }
   exit 0
 fi
 
@@ -337,5 +359,7 @@ done
 
 # older builds' folders are removed (the newest 3 stay)
 ls -d "$STATE/release"/*/ 2>/dev/null | sort -r | tail -n +4 | xargs -r rm -rf
-[ -z "$waiting" ] || die "released, but not:$waiting (resume with BUILD=$BUILD)"
+[ -z "$waiting" ] || { say "released, but not:$waiting (BUILD=$BUILD resumes it)"; exit 3; }
 say "live: $APP build $BUILD"
+exit 0
+}
