@@ -48,7 +48,8 @@ while IFS= read -r cmd; do
     echo "ok ($(($(date +%s) - t)) s): $cmd"
   else
     echo "::error::$cmd"
-    grep -E "^error|error:|error\[|FAILED|failed|^E:|not ok|BUILD FAILED|What went wrong" "$log" | head -40
+    # error lines only; if none exist, the log's last lines
+    grep -iE "^ *error|error:|error\[|FAILED|^E:|not ok|What went wrong|^\* " "$log" | head -40 | grep . || tail -15 "$log"
     exit 1
   fi
 done <<< "$cmds"

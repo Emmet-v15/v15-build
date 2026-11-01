@@ -54,6 +54,20 @@ if [ "${ANDROID:-}" = true ]; then
       echo "CARGO_TARGET_${u}_LINKER=$cc"
     done
   } >> "$GITHUB_ENV"
+  # When a Tauri app's project is created with the Rust CLI, its Gradle build
+  # runs `cargo tauri android android-studio-script`. In this case, the app's
+  # own npm CLI (node_modules/.bin/tauri) handles the task, using the same
+  # version the app pins.
+  if ! cargo tauri --version > /dev/null 2>&1; then
+    mkdir -p "$RUNNER_TEMP/bin"
+    cat > "$RUNNER_TEMP/bin/cargo-tauri" <<EOF2
+#!/usr/bin/env bash
+[ "\${1:-}" = tauri ] && shift
+exec "$GITHUB_WORKSPACE/src/node_modules/.bin/tauri" "\$@"
+EOF2
+    chmod +x "$RUNNER_TEMP/bin/cargo-tauri"
+    echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+  fi
   echo "Android SDK, NDK $(basename "$ndk")"
 fi
 

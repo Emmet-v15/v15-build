@@ -43,7 +43,7 @@ v15_build() {
   # releases.
   [ "$(git rev-parse -q --verify origin/main 2>/dev/null)" = "$sha" ] && cache=true
   gh workflow run build.yml --repo "$V15_BUILDER" ${V15_BUILDER_REF:+--ref "$V15_BUILDER_REF"} \
-    -f repo="$repo" -f ref="$sha" -f build="$build" -f platforms="$platforms" -f cache="$cache" -f nonce="$nonce" || return 1
+    -f repo="$repo" -f ref="$sha" -f build="$build" -f platforms="$platforms" -f cache="$cache" -f nonce="$nonce" > /dev/null || return 1
   V15_RUN=""
   for _ in $(seq 1 30); do
     V15_RUN=$(gh run list --repo "$V15_BUILDER" --workflow build.yml --limit 30 --json databaseId,displayTitle \
@@ -75,7 +75,10 @@ v15_build() {
         _v15_jobs "$V15_RUN" | while IFS=$'\t' read -r name concl step; do
           [ "$concl" = success ] || echo "  $name: $concl${step:+ at $step}"
         done
-        gh run view "$V15_RUN" --repo "$V15_BUILDER" --log-failed 2>/dev/null | sed -E 's/^[^\t]*\t[^\t]*\t[^ ]+ //' | tail -40
+        # the lines of the failed steps themselves, not their headers
+        # (env, inputs)
+        gh run view "$V15_RUN" --repo "$V15_BUILDER" --log-failed 2>/dev/null | sed -E 's/^[^\t]*\t[^\t]*\t[^ ]+ //' \
+          | awk '/##\[group\]/ { skip = 1 } /##\[endgroup\]/ { skip = 0; next } !skip' | tail -40
         return 1
         ;;
     esac
