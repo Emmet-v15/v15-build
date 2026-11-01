@@ -22,13 +22,12 @@
 # other status indicates failure.
 #   REMOTE=... the server with release-pull (default empire)
 #
-# Requires gh signed in, node, openssl, v15-release (v15-kit), and ssh to
-# REMOTE. It also needs the app's state/ directory (gitignored; a worktree
-# uses its main checkout's state/), which contains update-signing.pem (the
-# update key) and build-artifacts.key (the builder's encryption key,
-# scripts/artifact-key.sh). The entire script is read before execution ({ ...
-# } to the end), so pulling v15-build during a release cannot alter the
-# running instance.
+# Requires gh signed in, node, openssl, v15-release (v15-kit), and ssh to REMOTE. It also needs the
+# app's state/ directory (gitignored; a worktree uses its main checkout's state/), which contains
+# update-signing.pem (the update key; "release" → "key" names another path) and build-artifacts.key
+# (the builder's encryption key, scripts/artifact-key.sh). The entire script is read before
+# execution ({ ... } to the end), so pulling v15-build during a release cannot alter the running
+# instance.
 {
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -120,15 +119,16 @@ if [ "$SHA" != "$(git rev-parse origin/main)" ]; then
 fi
 [ -z "$(git status --porcelain --untracked-files=no)" ] || problem "uncommitted changes would not be in it: commit or stash them"
 
+KEYFILE=$(cfg 'c.release.key || "state/update-signing.pem"')
+KEY=$(local_file "$KEYFILE")
 STATE="$top/state"
-[ -f "$STATE/update-signing.pem" ] || STATE="$main_root/state"
-KEY="$STATE/update-signing.pem"
+[ -f "$STATE/build-artifacts.key" ] || STATE="$main_root/state"
 ART="$STATE/build-artifacts.key"
-[ -f "$KEY" ] || problem "no state/update-signing.pem (the app's update key; never regenerate it)"
+[ -f "$KEY" ] || problem "no $KEYFILE (the app's update key; never regenerate it)"
 [ -f "$ART" ] || problem "no state/build-artifacts.key: bash ../v15-build/scripts/artifact-key.sh $REPO state/build-artifacts.key"
 if [ -f "$KEY" ] && command -v v15-release > /dev/null; then
   have=$(v15-release pubkey --key "$KEY" 2>/dev/null | tr -d '\r')
-  [ "$have" = "$PUBKEY" ] || problem "state/update-signing.pem is the key $have, not release.pubkey $PUBKEY"
+  [ "$have" = "$PUBKEY" ] || problem "$KEYFILE is the key $have, not release.pubkey $PUBKEY"
 fi
 git grep -q "$PUBKEY" HEAD -- '*.rs' || problem "release.pubkey is not compiled into the app (no .rs file at HEAD holds it)"
 
@@ -282,7 +282,7 @@ fi
 if [ ! -f "$WORK/extra.done" ] && [ -n "$(cfg 'c.release.extra && "y"')" ]; then
   while IFS= read -r cmd; do
     [ -n "$cmd" ] || continue
-    V15_OUT="$FILES" V15_BUILD_ID="$BUILD" V15_VERSION="$VERSION" V15_SHA="$SHA" V15_APP="$APP" REMOTE="$REMOTE" \
+    V15_OUT="$FILES" V15_BUILD_ID="$BUILD" V15_VERSION="$VERSION" V15_SHA="$SHA" V15_APP="$APP" V15_KEY="$KEY" REMOTE="$REMOTE" \
       bash -c "$cmd" || die "extra: $cmd failed"
   done <<< "$(cfg 'c.release.extra')"
   touch "$WORK/extra.done"

@@ -140,11 +140,12 @@ cover everything:
 | `app` | the name in the update manifest, the release tags (`<app>-<build>`) and release-pull |
 | `site` | where the app's files and `manifest.json` are served; default is `https://v15.studio/<app>` |
 | `pubkey` | the public half of the update key, as it appears in the compiled app |
+| `key` | the update key's file, relative to the repository (a worktree uses its main checkout's); default `state/update-signing.pem` |
 | `package` | the Cargo package whose version the manifest shows; default is the top-level `package` |
 | `windows`, `linux`, `macos`, `ios`, `android` | For each platform, the `files` (built by the builder; on Windows, the first one is the exe installed by the kit's updater, served at `url`, defaulting to `<site>/<file>`, with its `.br`) and the `link`, whose download link is at the site root (installed by the release-pull config) |
 | `android.sign` | `{"keystore": "…", "password": "…", "alias": "…"}`: The unsigned APK is signed here using zipalign and apksigner; the keystore remains on this machine. |
 | `manifest`, `base` | the signed manifest's asset name (default `manifest.json`) and the live manifest it extends (default `<site>/manifest.json`) |
-| `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `REMOTE`), e.g. an older manifest |
+| `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `V15_KEY` (the update key's file), `REMOTE`), such as an older manifest; files from a dry run left on the builder have their `v15-sum` lines in `$V15_OUT/../sums-<platform>` |
 | `pull` | Release-pull configurations, one per release, starting with the app's own; the default is the first of `ops/<app>.json`, `<dir>/ops/<app>.json`, and `ops/release-pull/<app>.json`. A release contains only its configuration's assets and their `SHA256SUMS`. The first release must be complete, whereas a subsequent release (such as star's desktop packages) proceeds once it is ready. |
 
 The app stores a single-line `scripts/publish.sh`:
@@ -155,26 +156,23 @@ exec bash "$(dirname "$0")/../../v15-build/scripts/publish.sh" "$(dirname "$0")/
 
 `bash scripts/publish.sh` then:
 
-1. **Preflight**: before anything is built, every problem is listed with its
-   fix: main matches GitHub (pushing any local main ahead), no uncommitted
-   changes; `state/update-signing.pem` and `state/build-artifacts.key`
-   exist, the key's public half (`v15-release pubkey`) equals `pubkey`, and
-   `pubkey` is compiled into the app (stored in an `.rs` file); `gh` is
-   signed in and the builder holds the app's secrets; the server holds each
-   release-pull config (identical to the repo's); for Android, the keystore
-   and the SDK's apksigner are present.
-2. **Build**: Execute one run on the builder for each platform, including
-   checks, generating a build id (unix time). Files signed here (the exe,
-   the APK) are downloaded, decrypted, and verified against the run's
-   `v15-sum` lines.
-3. **Sign**: Sign the APK with the keystore; add the exe to the live
-   manifest (`v15-release add`, with its `.br`), then `v15-release verify`
-   verifies that installing the live build would update to this one.
-4. **Release**: Create a GitHub release for each release-pull config, then
-   run the server's `release-pull`, which installs files in the config's
-   order (manifests last) and fetches each served file back to verify its
-   hash there, so nothing is downloaded locally for checking. The five
-   newest releases are retained.
+1. **Preflight**: Before building, list all problems with their fixes: main matches GitHub
+   (pushing local main ahead if needed), no uncommitted changes; the update key
+   (`state/update-signing.pem`, or `key`) and `state/build-artifacts.key` exist, the key's public
+   half (`v15-release pubkey`) equals `pubkey`, and `pubkey` is compiled into the app (stored in
+   an `.rs` file); `gh` is signed in and the builder holds the app's secrets; the server holds
+   each release-pull config (identical to the repo's); for Android, the keystore and the SDK's
+   apksigner are present.
+2. **Build**: Execute one run on the builder per platform, including checks and generating a
+   build id (unix time). Files signed here (the exe, the APK) are downloaded, decrypted, and
+   verified against the run's `v15-sum` lines.
+3. **Sign**: Sign the APK with the keystore; add the exe to the live manifest (`v15-release add`,
+   with its `.br`), then `v15-release verify` verifies that installing the live build would
+   update to this one.
+4. **Release**: Create a GitHub release for each release-pull config, then run the server's
+   `release-pull`, which installs files in the config's order (manifests last) and fetches each
+   served file back to verify its hash there, so nothing is downloaded locally for checking. The
+   five newest releases are retained.
 
 `DRY=1` halts after signing; files not requiring signing remain on the
 builder, with their hashes sourced from the log. `BUILD=<id>` resumes a
