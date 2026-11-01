@@ -5,12 +5,18 @@
 # controlled by the "release" section in the app's ops/build.json.
 #
 #   bash ../v15-build/scripts/publish.sh <app repo>
-#   DRY=1      build and sign only (state/release/<build>/), nothing released;
-#              files that need no signing here stay on the builder (their
-#              hashes are read from its log)
+#
+# Built files stay on the builder: the exe is signed into the manifest from the
+# sha256 and size the run printed (v15-sum lines), the GitHub release holds only
+# the small files made here (manifests, SHA256SUMS, the signed APK), and the
+# server's release-pull fetches the rest from the run itself (--from), decrypting
+# them with the app's artifact key sent on stdin. Only an APK comes down, to be
+# signed with the keystore here.
+#   DRY=1      build and sign only (state/release/<build>/), nothing released
 #   LOCAL=1    build here instead of on the builder (a GitHub outage or a
 #              billing block): the same commands, under the RAM rule; the
-#              platforms this PC can't build wait for a later run
+#              platforms this PC can't build wait for a later run. Its files
+#              go up in the GitHub release, as before
 #   BUILD=<id> resume that build: whatever already happened (built, signed,
 #              released on GitHub, installed) is skipped
 #   PLATFORMS="windows android"  build only these this time (a release
@@ -90,9 +96,8 @@ EXE=$(files_of windows | head -1)
 EXE_URL=$(cfg 'c.release.windows && c.release.windows.url || ""')
 [ -n "$EXE" ] && [ -z "$EXE_URL" ] && EXE_URL="$SITE/$EXE"
 APK=$(cfg 'c.release.android && c.release.android.sign ? c.release.android.files[0] : ""')
-# Files for a platform signed here are downloaded; the others remain on the
-# builder until released.
-signed_here() { case "$1" in windows) [ -n "$EXE" ] ;; android) [ -n "$APK" ] ;; *) return 1 ;; esac; }
+# sha256 and size of a file the builder made, from its v15-sum lines
+sum_of() { cat "$WORK"/sums-* 2>/dev/null | awk -v n="$1" '$3 == n { print $1, $2; exit }'; }
 
 # ── preflight: verifies all items before the build begins ─────────────────
 problems=()
@@ -100,6 +105,9 @@ warn=()
 problem() { problems+=("$1"); }
 command -v gh > /dev/null && gh auth status > /dev/null 2>&1 || problem "gh is not signed in: gh auth login"
 command -v v15-release > /dev/null || problem "no v15-release: cargo install --git https://github.com/Emmet-v15/v15-kit v15-release"
+# (signing from the builder's hashes: v15-kit 0.6.4's v15-release)
+command -v v15-release > /dev/null && { v15-release add --help 2>/dev/null | grep -q -- --br-size; } \
+  || problem "v15-release can't sign from hashes: cargo install --git https://github.com/Emmet-v15/v15-kit v15-release --force"
 command -v openssl > /dev/null || problem "no openssl (Git Bash has one)"
 [ -n "$PLATFORMS" ] || problem "\"release\" names no platform (windows, linux, macos, ios, android)"
 case "$PUBKEY" in *[!0-9a-f]* | "") problem "release.pubkey: the 64 hex digits the app compiles in" ;; esac
@@ -159,6 +167,16 @@ if [ -n "$APK" ]; then
 fi
 
 pull_name() { basename "$1" .json; }
+# Can the server's release-pull take files from the builder? Until it can,
+# they come down here and go up in the release, as before.
+FROM_BUILDER=0
+if [ "$LOCAL" != 1 ]; then
+  if ssh -o ConnectTimeout=15 "$REMOTE" "grep -q '^FEATURES = .*builder-artifacts' /usr/local/bin/release-pull" 2>/dev/null; then
+    FROM_BUILDER=1
+  else
+    warn+=("$REMOTE's release-pull can't fetch from the builder yet, so the files come down here and go up to GitHub: bash ../v15-kit/ops/release-pull/install.sh $REMOTE $(echo "$PULLS" | head -1)")
+  fi
+fi
 for pull in $PULLS; do
   [ -f "$pull" ] || { problem "no $pull (the release-pull config)"; continue; }
   name=$(pull_name "$pull")
@@ -198,6 +216,11 @@ fi
 echo "$SHA" > "$WORK/sha"
 [ "$PUSH" = 0 ] || git push -q origin main || die "git push failed"
 echo "== $APP $VERSION, build $BUILD, from ${SHA::7}$([ "$DRY" = 1 ] && echo ", dry run")$([ "$LOCAL" = 1 ] && echo ", built here") =="
+# (a resumed build that is live already needs nothing, not even its builder files,
+# which expire after a day)
+live=1
+for pull in $PULLS; do [ -f "$WORK/live-$(pull_name "$pull")" ] || live=0; done
+[ "$DRY" = 1 ] || [ "$live" = 0 ] || { say "build $BUILD is live already"; exit 0; }
 
 # ── build ──────────────────────────────────────────────────────────────────
 have_files() { local f; for f in $(files_of "$1"); do [ -f "$FILES/$f" ] || return 1; done; }
@@ -224,19 +247,31 @@ else
     [ -n "${V15_RUN:-}" ] || die "the builder's run didn't start: LOCAL=1 builds here"
     for p in $todo; do v15_build_has "$V15_RUN" "$p" && echo "$V15_RUN" > "$WORK/run-$p"; done
     [ "$ok" = 1 ] || say "the run failed for some platforms: what built goes on; resume with BUILD=$BUILD"
+    # new files: what was signed or made from the old ones is made again
+    rm -f "$WORK/extra.done"
+    case " $todo " in *" windows "*) rm -f "$FILES/$MANIFEST" ;; esac
   fi
   for p in $need; do
     r=$(run_of "$p")
     [ -n "$r" ] || continue
-    if signed_here "$p" || [ "$DRY" != 1 ]; then
-      v15_build_fetch "$r" "$FILES" "$ART" "$p" || die "$p: the files didn't come back from run $r"
+    # Each file stays on the builder (its hashes from the run's log) unless it
+    # is signed here (the APK) or the server can't fetch it from there.
+    stay=0
+    { [ "$FROM_BUILDER" = 1 ] || [ "$DRY" = 1 ]; } && stay=1
+    [ "$p" = android ] && [ -n "$APK" ] && stay=0
+    if [ "$stay" = 1 ]; then
+      v15_build_sums "$r" "$p" > "$WORK/sums-$p" && [ -s "$WORK/sums-$p" ] || { rm -f "$WORK/sums-$p"; die "$p: no v15-sum lines in run $r's log"; }
+      # (a run from before the builder packed the exe's .br: downloaded, as before)
+      if [ "$p" = windows ] && [ -n "$EXE" ] && [ -z "$(sum_of "$EXE.br")" ]; then rm -f "$WORK/sums-$p"; stay=0; fi
+    fi
+    if [ "$stay" = 1 ]; then
+      say "$p: on run $r, not downloaded: $(awk '{printf "%s %s bytes, ", $3, $2}' "$WORK/sums-$p")"
     else
-      # (a dry run leaves them there: their hashes, from the run's log)
-      v15_build_sums "$r" "$p" > "$WORK/sums-$p" || true
-      say "$p: built on run $r, not downloaded: $(awk '{printf "%s %s bytes, ", $3, $2}' "$WORK/sums-$p")"
+      v15_build_fetch "$r" "$FILES" "$ART" "$p" || die "$p: the files didn't come back from run $r"
     fi
   done
 fi
+t_built=$SECONDS
 
 # ── sign ───────────────────────────────────────────────────────────────────
 if [ -n "$APK" ] && [ -f "$FILES/$APK" ] && [ ! -f "$FILES/$APK.unsigned" ]; then
@@ -256,12 +291,28 @@ if [ -n "$APK" ] && [ -f "$FILES/$APK" ]; then
   say "android: $APK signed, certificate SHA-256 $cert"
 fi
 
-if [ -n "$EXE" ] && [ -f "$FILES/$EXE" ] && [ ! -f "$FILES/$MANIFEST" ]; then
-  say "windows: signing $EXE into $MANIFEST (on $BASE)"
+# The exe is signed from the file when it is here, otherwise from the hashes
+# the builder printed for it and its .br (the same signed message: app,
+# platform, build, size, sha256).
+exe_sum=""
+if [ -n "$EXE" ] && [ ! -f "$FILES/$EXE" ]; then
+  exe_sum=$(sum_of "$EXE")
+  br_sum=$(sum_of "$EXE.br")
+  [ -z "$exe_sum" ] || [ -n "$br_sum" ] || die "windows: run $(run_of windows) printed no $EXE.br line"
+fi
+if [ -n "$EXE" ] && [ ! -f "$FILES/$MANIFEST" ] && { [ -f "$FILES/$EXE" ] || [ -n "$exe_sum" ]; }; then
+  say "windows: signing $EXE into $MANIFEST (on $BASE)$([ -n "$exe_sum" ] && echo ", from the builder's hashes")"
+  if [ -n "$exe_sum" ]; then
+    what=(--sha256 "${exe_sum% *}" --size "${exe_sum#* }" --br-size "${br_sum#* }")
+  elif [ -f "$FILES/$EXE.br" ]; then
+    what=(--file "$EXE" --br-file "$EXE.br")  # the builder's, checked to unpack to the exe
+  else
+    what=(--file "$EXE" --br)
+  fi
   (
     cd "$FILES"
     v15-release add --app "$APP" --platform windows-x86_64 --build "$BUILD" --version "$VERSION" \
-      --file "$EXE" --url "$EXE_URL" --br --notes "$NOTES" \
+      "${what[@]}" --url "$EXE_URL" --notes "$NOTES" \
       --base "$BASE" --out "$MANIFEST.tmp" --key "$KEY" --expect-pubkey "$PUBKEY"
   ) || die "windows: signing failed"
   mv "$FILES/$MANIFEST.tmp" "$FILES/$MANIFEST"
@@ -271,10 +322,17 @@ if [ -n "$EXE" ] && [ -f "$FILES/$MANIFEST" ]; then
   # (no live manifest yet: a first release)
   prev=$({ curl -fsS --max-time 30 "$BASE" 2>/dev/null || true; } | node -e 'try{const m=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(m.latest||0)}catch{console.log(0)}' | tr -d '\r')
   [ -n "$prev" ] && [ "$prev" != "$BUILD" ] && [ "$prev" -lt "$BUILD" ] || prev=$((BUILD - 1))
+  check=()
+  [ -f "$FILES/$EXE" ] && check=(--file "$FILES/$EXE")
   v15-release verify --manifest "$FILES/$MANIFEST" --app "$APP" --platform windows-x86_64 \
-    --pubkey "$PUBKEY" --current "$prev" --file "$FILES/$EXE" > "$WORK/verify.log" 2>&1 \
+    --pubkey "$PUBKEY" --current "$prev" "${check[@]}" > "$WORK/verify.log" 2>&1 \
     || { cat "$WORK/verify.log"; die "windows: the signed manifest doesn't verify"; }
-  grep -q "$BUILD" "$WORK/verify.log" || { cat "$WORK/verify.log"; die "windows: an install of build $prev would not update to $BUILD"; }
+  grep -q "^build $BUILD " "$WORK/verify.log" || { cat "$WORK/verify.log"; die "windows: an install of build $prev would not update to $BUILD"; }
+  if [ -n "$exe_sum" ]; then
+    # the build the manifest signs is the run's exe
+    grep -q "^build $BUILD .* ${exe_sum#* } bytes sha256 ${exe_sum% *}\$" "$WORK/verify.log" \
+      || { cat "$WORK/verify.log"; die "windows: $MANIFEST doesn't sign run $(run_of windows)'s $EXE ($exe_sum): sign it again (rm $FILES/$MANIFEST)"; }
+  fi
   say "windows: $MANIFEST verified (an install of build $prev updates to $BUILD)"
 fi
 
@@ -296,9 +354,17 @@ for pull in $PULLS; do
   assets=$(j "$pull" '[...new Set(c.files.map(f => f.asset))]')
   missing=""
   remote=""
+  from=""
   for a in $assets; do
     if [ -f "$FILES/$a" ]; then continue; fi
-    if [ "$DRY" = 1 ] && cat "$WORK"/sums-* 2>/dev/null | awk '{print $3}' | grep -qx "$a"; then remote="$remote $a"; continue; fi
+    if [ -n "$(sum_of "$a")" ]; then
+      remote="$remote $a"
+      # the run and platform it is on
+      p=""
+      for f in "$WORK"/sums-*; do awk -v n="$a" '$3 == n { f = 1 } END { exit !f }' "$f" && { p=${f##*sums-}; break; }; done
+      case "$from" in *" --from $(run_of "$p")/$p"*) ;; *) from="$from --from $(run_of "$p")/$p" ;; esac
+      continue
+    fi
     missing="$missing $a"
   done
   if [ -n "$missing" ]; then
@@ -311,19 +377,22 @@ for pull in $PULLS; do
   rm -rf "$rel" && mkdir -p "$rel"
   local_assets=""
   for a in $assets; do [ -f "$FILES/$a" ] && { cp "$FILES/$a" "$rel/$a"; local_assets="$local_assets $a"; }; done
+  # SHA256SUMS: the files made here, hashed here; the builder's, from its log
+  # shellcheck disable=SC2086
+  (cd "$rel" && v15-release sums --out SHA256SUMS $local_assets > /dev/null)
+  for a in $remote; do s=$(sum_of "$a"); echo "${s% *}  $a" >> "$rel/SHA256SUMS"; done
+  echo "$from" > "$WORK/$name.from"
   if [ -z "$remote" ]; then
-    # shellcheck disable=SC2086
-    (cd "$rel" && v15-release sums --out SHA256SUMS $assets > /dev/null)
     say "$name: ready"
-    sed 's/^/    /' "$rel/SHA256SUMS"
   else
-    say "$name: ready (signed here:$local_assets; on the builder:$remote)"
+    say "$name: ready (made here:${local_assets:- none}; on the builder:$remote)"
   fi
+  sed 's/^/    /' "$rel/SHA256SUMS"
   ready="$ready $pull"
 done
 
 if [ "$DRY" = 1 ]; then
-  say "dry run: build $BUILD built and signed in $WORK, nothing released"
+  say "dry run: build $BUILD built and signed in $WORK, nothing released ($((SECONDS - t_built)) s here after the build)"
   [ -z "$waiting" ] || { say "waiting:$waiting (BUILD=$BUILD resumes it)"; exit 3; }
   exit 0
 fi
@@ -335,6 +404,13 @@ for pull in $ready; do
   prefix=$(j "$pull" 'c.tag.replace(/^\^/, "").replace(/-\[0-9\]\+\$$/, "")')
   tag="$prefix-$BUILD"
   rel="$WORK/$name"
+  if gh release view "$tag" --repo "$repo" > /dev/null 2>&1 \
+    && old=$(gh release download "$tag" --repo "$repo" -p SHA256SUMS -O - 2>/dev/null | tr -d '\r') \
+    && [ -n "$old" ] && [ "$old" != "$(tr -d '\r' < "$rel/SHA256SUMS")" ]; then
+    # (signed from a build that has since been made again)
+    say "$tag: on GitHub with other files; replacing it"
+    gh release delete "$tag" --repo "$repo" --cleanup-tag -y > /dev/null || die "$tag: deleting the stale release failed"
+  fi
   if gh release view "$tag" --repo "$repo" > /dev/null 2>&1; then
     up=$(gh release view "$tag" --repo "$repo" --json assets -q '.assets[].name' | tr -d '\r')
     for f in "$rel"/*; do
@@ -352,19 +428,27 @@ for pull in $ready; do
     | sort -t- -k"$(($(echo "$prefix" | tr -cd - | wc -c) + 2))" -rn | tail -n +6 \
     | while read -r old; do gh release delete "$old" --repo "$repo" --cleanup-tag -y > /dev/null && say "pruned $old"; done
 
+  from=$(cat "$WORK/$name.from" 2>/dev/null || true)
   if ssh "$REMOTE" "grep -qF '$name: $tag installed' /var/log/release-pull.log"; then
     say "$tag: installed already"
+  elif [ -n "$from" ]; then
+    say "$tag → $REMOTE (release-pull $name, the builder's files from$(echo "$from" | sed 's/ --from / /g'))"
+    # release-pull fetches the release and the run's files, decrypts them with
+    # the artifact key (on stdin, after the token; never stored there), checks
+    # them against SHA256SUMS and the signed manifest, places each file
+    # (manifests last) and fetches every served file back to verify its hash.
+    { gh auth token; tr -d '\r\n' < "$ART"; echo; } | ssh "$REMOTE" "release-pull $name '$tag'$from" \
+      || die "$tag: release-pull failed: resume with BUILD=$BUILD"
   else
     say "$tag → $REMOTE (release-pull $name)"
-    # release-pull places each file, with manifests last, and fetches every
-    # served file to verify its hash: nothing is downloaded locally.
     gh auth token | ssh "$REMOTE" "release-pull $name '$tag'" || die "$tag: release-pull failed: resume with BUILD=$BUILD"
   fi
+  touch "$WORK/live-$name"
 done
 
 # older builds' folders are removed (the newest 3 stay)
 ls -d "$STATE/release"/*/ 2>/dev/null | sort -r | tail -n +4 | xargs -r rm -rf
 [ -z "$waiting" ] || { say "released, but not:$waiting (BUILD=$BUILD resumes it)"; exit 3; }
-say "live: $APP build $BUILD"
+say "live: $APP build $BUILD ($((SECONDS - t_built)) s here after the build)"
 exit 0
 }

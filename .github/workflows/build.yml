@@ -233,7 +233,10 @@ jobs:
         run: |
           if [ "$LEGACY" = true ]; then bash builder/scripts/release.sh; else bash builder/scripts/run.sh build; fi
       # Each file's SHA256 and size are recorded in the log (v15-sum lines),
-      # allowing a build to be compared without downloading it.
+      # allowing a build to be signed and compared without downloading it.
+      # A Windows exe also gets its brotli copy (<exe>.br, what the kit's
+      # updater downloads) here, so the owner's PC signs the manifest from
+      # these lines and the server fetches both files from this run.
       - name: encrypt
         if: inputs.build != ''
         working-directory: out
@@ -241,6 +244,18 @@ jobs:
           K: ${{ secrets[steps.names.outputs.artifact] }}
         run: |
           [ -n "$K" ] || { echo "no ${{ steps.names.outputs.artifact }} secret: scripts/artifact-key.sh"; exit 1; }
+          if [ "$PLATFORM" = windows ]; then
+            for f in *.exe; do
+              [ -e "$f" ] || continue
+              node -e '
+                const z = require("zlib"), fs = require("fs"), [i, o] = process.argv.slice(1), b = fs.readFileSync(i);
+                const p = z.brotliCompressSync(b, { params: { [z.constants.BROTLI_PARAM_QUALITY]: 11,
+                  [z.constants.BROTLI_PARAM_LGWIN]: 24, [z.constants.BROTLI_PARAM_SIZE_HINT]: b.length } });
+                if (!z.brotliDecompressSync(p).equals(b)) { console.error(i + ": brotli did not round-trip"); process.exit(1); }
+                fs.writeFileSync(o, p);
+              ' "$f" "$f.br"
+            done
+          fi
           for f in *; do
             echo "v15-sum $(openssl dgst -sha256 -r "$f" | cut -d' ' -f1) $(wc -c < "$f" | tr -d ' ') $f"
             openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 100000 -salt -in "$f" -out "$f.enc" -pass env:K && rm "$f"
