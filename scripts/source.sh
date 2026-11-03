@@ -153,7 +153,12 @@ case "${1:-}" in
       # the original form: top-level "tools"
       if [ -f "$cfg" ]; then
         for tool in $(jq -r '.tools[]? // empty' "$cfg" | tr -d '\r'); do
-          case "$tool" in nasm) out "nasm=true" ;; *) echo "tools: unknown $tool"; exit 1 ;; esac
+          case "$tool" in
+            nasm) out "nasm=true" ;;
+            bun) out "bun=1.4.2" ;;
+            bun:[0-9]*) case "${tool#bun:}" in *[!0-9.]*) echo "tools: bun:<version>"; exit 1 ;; esac; out "bun=${tool#bun:}" ;;
+            *) echo "tools: unknown $tool (nasm, bun[:version])"; exit 1 ;;
+          esac
         done
       fi
     else
@@ -166,7 +171,9 @@ case "${1:-}" in
           java:[0-9]*) out "java=${tool#java:}" ;;
           android) out "android=true" ;;
           xcode:[0-9]*) out "xcode=${tool#xcode:}" ;;
-          *) echo "tools: unknown $tool (nasm, node[:N], java[:N], android, xcode:N)"; exit 1 ;;
+          bun) out "bun=1.4.2" ;;
+          bun:[0-9]*) out "bun=${tool#bun:}" ;;
+          *) echo "tools: unknown $tool (nasm, node[:N], java[:N], android, xcode:N, bun[:version])"; exit 1 ;;
         esac
       done
       case "$(q '.[$p].tools // [] | join(" ")')" in *[!A-Za-z0-9.:\ ]*) echo "tools: names and versions"; exit 1 ;; esac

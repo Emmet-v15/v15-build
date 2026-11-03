@@ -33,8 +33,9 @@ requires only the top-level keys (the original form, all optional):
   "exe": "myapp.exe",
   "features": ["tauri/custom-protocol"],
   "before_release": ["npm --prefix ui ci && npm --prefix ui run build"],
-  "checks": ["fmt", "clippy", "test"],
-  "commands": ["node --test web/test/"],
+  "checks": ["fmt", "clippy"],
+  "test": ["cargo test --workspace --locked", "node --test web/test/"],
+  "commands": ["node scripts/lint.js"],
   "release": { "app": "myapp", "pubkey": "…", "windows": { "files": ["myapp.exe"], "link": "myapp.exe" } }
 }
 ```
@@ -43,12 +44,13 @@ requires only the top-level keys (the original form, all optional):
 |---|---|
 | `deps` | private repositories it fetches, as cargo git dependencies on `https://github.com/<owner>/<repo>` (≤ 4) |
 | `dir` | the path to the Cargo workspace folder, relative to the root; default `.` |
-| `tools` | tools the build needs beyond Rust and Node: `nasm` |
+| `tools` | tools the build needs beyond Rust and Node: `nasm`, `bun` (`bun:<version>`; default 1.4.2) |
 | `package`, `exe` | what a release builds (with `V15_BUILD_ID` set to the build id) |
 | `features` | cargo features for the release build (`tauri/custom-protocol` embeds a Tauri app's UI, as `tauri build` does) |
 | `before_release` | commands executed in the repository's root prior to the release build, e.g. building the UI it embeds |
-| `checks` | any of `fmt`, `clippy` (warnings are errors), `test`; default is all three |
-| `commands` | additional checks, run in the repository's root after the Rust ones |
+| `test` | the app's tests: [Tests](#tests). Every app has it |
+| `checks` | any of `fmt`, `clippy` (warnings are errors), `test` (`cargo test --workspace --locked`, only when there's no `test` key); default is all three |
+| `commands` | additional checks, run in the repository's root after the Rust ones and the tests |
 | `release` | how it gets released: [A release](#a-release) |
 
 ### Platforms
@@ -57,8 +59,8 @@ Apps that ship on more platforms than Windows assign a section to each
 platform (`windows`, `linux`, `macos`, `ios`, `android`). Each section runs
 as a separate job on its own runner, using the app's own commands. If any
 section exists, the top-level `tools`, `package`, `exe`, `features`,
-`before_release`, `checks` and `commands` do not apply; `deps` and `dir`
-still do. star's (`Emmet-v15/star3`) is the full example:
+`before_release`, `checks` and `commands` do not apply; `deps`, `dir` and
+`test` still do (`test` runs in the `windows` job, after its `check`). star's (`Emmet-v15/star3`) is the full example:
 
 ```json
 "ios": {
@@ -79,7 +81,7 @@ still do. star's (`Emmet-v15/star3`) is the full example:
 |---|---|
 | `runner` | the image, one of `windows-2025`, `windows-2022`, `ubuntu-24.04`, `ubuntu-22.04`, `macos-15`, `macos-14`; default `windows-2025` (windows), `ubuntu-24.04` (linux, android), `macos-15` (macos, ios). Linux packages built on the oldest image run on the most systems |
 | `timeout` | Minutes before the job stops; default is 60 |
-| `tools` | `node` (22; `node:20`), `java` (Temurin 17; `java:21`), `android` (the runner's SDK and NDK as `ANDROID_HOME` and `NDK_HOME`, and the NDK's compilers for cargo's Android targets), `xcode:16.4` (that Xcode selected), `nasm` |
+| `tools` | `node` (22; `node:20`), `java` (Temurin 17; `java:21`), `android` (the runner's SDK and NDK as `ANDROID_HOME` and `NDK_HOME`, and the NDK's compilers for cargo's Android targets), `xcode:16.4` (that Xcode selected), `nasm`, `bun` (1.4.2; `bun:1.4.3`) |
 | `targets` | Rust targets added to the toolchain (`rust-toolchain.toml`, otherwise stable) |
 | `apt`, `brew` | packages installed first (Linux, macOS) |
 | `checkouts` | up to 2 more private repositories, checked out beside the app (`src/`) at `path`, at `ref` (default `main`) with their history: `{"repo": "name"}` with its `KEY_<NAME>`, or `{"secret": "NAME"}`, whose repository and key are the app's secrets `NAME_REPO_<APP>` and `NAME_KEY_<APP>` (a name that stays out of the public log) |
@@ -119,6 +121,52 @@ failed jobs once only if the failure was due to infrastructure issues (a
 lost runner, a timeout, or a network fault during setup), not if a check or
 the build failed. `V15_BUILDER_REF=<branch>` executes this repository's
 workflow from a branch.
+
+## Tests
+
+Every app is tested with one command, the same in each repository; its
+AGENTS.md `test` row says so:
+
+```bash
+bash ~/projects/v15-build/scripts/test.sh            # the app in this folder
+bash ~/projects/v15-build/scripts/test.sh myapp      # or a folder beside v15-build
+```
+
+It runs the app's `test` commands from `ops/build.json`, in the repository's
+root, in order:
+
+```json
+"test": [
+  "cd app && cargo test --workspace --locked",
+  "node --test web/test/"
+]
+```
+
+- Each command runs, even after one fails; the script exits 1 if any did.
+  It prints `ok (<s> s): <command>` or the failure's error lines and where
+  its whole output is.
+- Every `cargo build|check|test|clippy|run|bench|doc` passes `--locked` (or
+  `--frozen`); the script refuses one that doesn't, so a test never moves
+  `Cargo.lock`. Cargo calls a command makes itself (an npm script) can't be
+  seen: pass `--locked` there too.
+- On this PC, cargo gets the RAM rule before each command
+  (`scripts/ram.sh`): floor((free GB − 6) / 1.5) jobs, at least 1, and 1
+  while another build runs.
+- The builder runs the same script in every run's `windows` job (the
+  original form: in place of the `test` check, before `commands`; a
+  platform section: after the `windows` `check`). So passing here is
+  passing there, and only what a clean runner can do belongs in `test`
+  (no admin, no running server, no live hosts); slower suites stay the
+  app's own, named in its AGENTS.md.
+
+A library bump across every app is then one loop, in Git Bash: bump it in
+each, then
+
+```bash
+for app in myapp otherapp; do bash ~/projects/v15-build/scripts/test.sh $app || echo "$app: failed"; done
+```
+
+and commit in each that passed.
 
 ## A release
 

@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # Runs the app's checks offline, after fetch.sh retrieves everything: the
 # "checks" field in ops/build.json (defaulting to fmt, clippy, test), within
-# its "dir", followed by its "commands" at the repository's root. Each check
+# its "dir", then its "test" commands (test.sh; they replace the test
+# check), followed by its "commands" at the repository's root. Each check
 # saves its full output to a file and displays only error lines (logs are
 # public).
 set -uo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd src
 export CARGO_NET_OFFLINE=true
 cfg=ops/build.json
 checks="fmt clippy test"
 commands=""
+tested=false
 # jq on the Windows runner ends lines with CR LF
 if [ -f "$cfg" ]; then
   checks=$(jq -r 'if .checks then .checks[] else "fmt", "clippy", "test" end' "$cfg" | tr -d '\r')
   commands=$(jq -r '.commands[]? // empty' "$cfg" | tr -d '\r')
+  tested=$(jq 'has("test")' "$cfg" | tr -d '\r')
 fi
 failed=0
 top=$(dirname "$PWD")
@@ -28,6 +32,7 @@ for c in $checks; do
       failed=1
     } ;;
     test)
+      [ "$tested" = false ] || continue
       if cargo test --workspace --locked > "$top/test.log" 2>&1; then
         grep -E "^test result" "$top/test.log"
       else
@@ -40,6 +45,7 @@ for c in $checks; do
   esac
 done
 cd "$top/src"
+[ "$tested" = false ] || bash "$here/test.sh" . || failed=1
 
 printf '%s\n' "$commands" | while IFS= read -r cmd; do
   [ -n "$cmd" ] || continue

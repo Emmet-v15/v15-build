@@ -7,9 +7,7 @@
 # "build" commands (`scripts/run.sh`). This is limited to Windows and
 # Android (as this is a Windows PC).
 #   bash local.sh <app repo> <sha> <build id> <platform> <out dir>
-# The RAM rule: cargo receives floor((free GB - 6) / 1.5) jobs, with a
-# minimum of 1, and is limited to 1 job while another build (rustc, cargo,
-# java, gradle) runs.
+# Cargo gets the RAM rule (ram.sh).
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 top="${1:?usage: local.sh <app repo> <sha> <build> <platform> <out>}"
@@ -25,12 +23,9 @@ j() {
   ' "$1" "$2" | tr -d '\r'
 }
 
-free=$(powershell -NoProfile -Command "[math]::Floor((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB * 10) / 10" | tr -d '\r')
-jobs=$(awk -v f="$free" 'BEGIN { j = int((f - 6) / 1.5); print (j < 1 ? 1 : j) }')
-busy=$(tasklist 2>/dev/null | grep -ciE "^(rustc|cargo|java|gradle)" || true)
-[ "$busy" = 0 ] || jobs=1
+source "$here/ram.sh"
+v15_jobs
 echo "local: $platform, $free GB free, $busy other build processes: $jobs cargo jobs"
-export CARGO_BUILD_JOBS=$jobs
 
 work="$top/state/release/$build/local-$platform"
 rm -rf "$work"

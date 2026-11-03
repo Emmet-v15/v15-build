@@ -7,6 +7,7 @@
 #                  the release's files for the platform ("release" → the
 #                  platform → "files", else the section's "outputs") must be
 #                  there
+# On the Windows job, "check" then runs the app's "test" commands (test.sh).
 # The app secrets the section names ("secrets") are in the environment
 # under their names, from N1..N4 and S1..S4. Each command's output is
 # written to a file; only error lines are displayed (the log is public).
@@ -14,6 +15,7 @@
 # LOCAL=1 (scripts/local.sh): on the owner's machine, in a worktree at the
 # commit; the same commands.
 set -uo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 mode="${1:?usage: run.sh check|build}"
 top="${V15_TOP:-$PWD}"
 cd "${V15_SRC:-src}"
@@ -53,6 +55,10 @@ while IFS= read -r cmd; do
     exit 1
   fi
 done <<< "$cmds"
+
+if [ "$mode" = check ] && [ "$PLATFORM" = windows ] && [ "$(q 'has("test")')" = true ]; then
+  bash "$here/test.sh" . || exit 1
+fi
 
 if [ "$mode" = build ]; then
   files=${V15_FILES-$(q '(.release[$p].files // .[$p].outputs // [])[]')}
