@@ -96,6 +96,10 @@ EXE=$(files_of windows | head -1)
 EXE_URL=$(cfg 'c.release.windows && c.release.windows.url || ""')
 [ -n "$EXE" ] && [ -z "$EXE_URL" ] && EXE_URL="$SITE/$EXE"
 APK=$(cfg 'c.release.android && c.release.android.sign ? c.release.android.files[0] : ""')
+# the Linux binary the kit's updater installs (linux-x86_64), served at its url
+BIN=$(files_of linux | head -1)
+BIN_URL=$(cfg 'c.release.linux && c.release.linux.url || ""')
+[ -n "$BIN" ] && [ -z "$BIN_URL" ] && BIN_URL="$SITE/$BIN"
 # sha256 and size of a file the builder made, from its v15-sum lines
 sum_of() { cat "$WORK"/sums-* 2>/dev/null | awk -v n="$1" '$3 == n { print $1, $2; exit }'; }
 
@@ -253,7 +257,7 @@ else
     [ "$ok" = 1 ] || say "the run failed for some platforms: what built goes on; resume with BUILD=$BUILD"
     # new files: what was signed or made from the old ones is made again
     rm -f "$WORK/extra.done"
-    case " $todo " in *" windows "*) rm -f "$FILES/$MANIFEST" ;; esac
+    case " $todo " in *" windows "* | *" linux "*) rm -f "$FILES/$MANIFEST" "$WORK/linux.signed" ;; esac
   fi
   for p in $need; do
     r=$(run_of "$p")
@@ -264,6 +268,7 @@ else
     { [ "$FROM_BUILDER" = 1 ] || [ "$DRY" = 1 ]; } && stay=1
     [ "$p" = android ] && [ -n "$APK" ] && stay=0
     [ "$p" = windows ] && [ -n "$EXE" ] && [ "$SIGN_HASH" = 0 ] && stay=0
+    [ "$p" = linux ] && [ -n "$BIN" ] && [ "$SIGN_HASH" = 0 ] && stay=0
     if [ "$stay" = 1 ]; then
       v15_build_sums "$r" "$p" > "$WORK/sums-$p" && [ -s "$WORK/sums-$p" ] || { rm -f "$WORK/sums-$p"; die "$p: no v15-sum lines in run $r's log"; }
       # (a run from before the builder packed the exe's .br: downloaded, as before)
@@ -339,6 +344,41 @@ if [ -n "$EXE" ] && [ -f "$FILES/$MANIFEST" ]; then
       || { cat "$WORK/verify.log"; die "windows: $MANIFEST doesn't sign run $(run_of windows)'s $EXE ($exe_sum): sign it again (rm $FILES/$MANIFEST)"; }
   fi
   say "windows: $MANIFEST verified (an install of build $prev updates to $BUILD)"
+fi
+
+# The Linux binary, signed the same way (no brotli copy) into the manifest
+# the exe went into, else onto the live one.
+bin_sum=""
+[ -n "$BIN" ] && [ ! -f "$FILES/$BIN" ] && bin_sum=$(sum_of "$BIN")
+if [ -n "$BIN" ] && [ ! -f "$WORK/linux.signed" ] && { [ -f "$FILES/$BIN" ] || [ -n "$bin_sum" ]; } \
+  && { [ -z "$EXE" ] || [ -f "$FILES/$MANIFEST" ]; }; then
+  base=$BASE
+  [ -f "$FILES/$MANIFEST" ] && base=$MANIFEST
+  say "linux: signing $BIN into $MANIFEST (on $base)$([ -n "$bin_sum" ] && echo ", from the builder's hashes")"
+  if [ -n "$bin_sum" ]; then what=(--sha256 "${bin_sum% *}" --size "${bin_sum#* }"); else what=(--file "$BIN"); fi
+  (
+    cd "$FILES"
+    v15-release add --app "$APP" --platform linux-x86_64 --build "$BUILD" --version "$VERSION" \
+      "${what[@]}" --url "$BIN_URL" --notes "$NOTES" \
+      --base "$base" --out "$MANIFEST.tmp" --key "$KEY" --expect-pubkey "$PUBKEY"
+  ) || die "linux: signing failed"
+  mv "$FILES/$MANIFEST.tmp" "$FILES/$MANIFEST"
+  # (a manifest that fails is removed: the next run signs both again)
+  bad() { cat "$WORK/verify-linux.log"; rm -f "$FILES/$MANIFEST"; die "linux: $1"; }
+  prev=$({ curl -fsS --max-time 30 "$BASE" 2>/dev/null || true; } | node -e 'try{const m=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(m.latest||0)}catch{console.log(0)}' | tr -d '\r')
+  [ -n "$prev" ] && [ "$prev" != "$BUILD" ] && [ "$prev" -lt "$BUILD" ] || prev=$((BUILD - 1))
+  check=()
+  [ -f "$FILES/$BIN" ] && check=(--file "$FILES/$BIN")
+  v15-release verify --manifest "$FILES/$MANIFEST" --app "$APP" --platform linux-x86_64 \
+    --pubkey "$PUBKEY" --current "$prev" "${check[@]}" > "$WORK/verify-linux.log" 2>&1 \
+    || bad "the signed manifest doesn't verify"
+  grep -q "^build $BUILD " "$WORK/verify-linux.log" || bad "an install of build $prev would not update to $BUILD"
+  if [ -n "$bin_sum" ]; then
+    grep -q "^build $BUILD .* ${bin_sum#* } bytes sha256 ${bin_sum% *}\$" "$WORK/verify-linux.log" \
+      || bad "$MANIFEST doesn't sign run $(run_of linux)'s $BIN ($bin_sum)"
+  fi
+  touch "$WORK/linux.signed"
+  say "linux: $MANIFEST verified (an install of build $prev updates to $BUILD)"
 fi
 
 # the app's own extra files (older manifests, archives), once

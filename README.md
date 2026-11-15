@@ -191,7 +191,7 @@ cover everything:
 | `pubkey` | the public half of the update key, as it appears in the compiled app |
 | `key` | the update key's file, relative to the repository (a worktree uses its main checkout's); default `state/update-signing.pem` |
 | `package` | the Cargo package whose version the manifest shows; default is the top-level `package` |
-| `windows`, `linux`, `macos`, `ios`, `android` | For each platform, the `files` (built by the builder; on Windows, the first one is the exe installed by the kit's updater, served at `url`, defaulting to `<site>/<file>`, with its `.br`) and the `link`, whose download link is at the site root (installed by the release-pull config) |
+| `windows`, `linux`, `macos`, `ios`, `android` | For each platform, the `files` (built by the builder; on Windows, the first one is the exe installed by the kit's updater, served at `url`, defaulting to `<site>/<file>`, with its `.br`; on Linux, the first one is the binary the kit's updater installs, `linux-x86_64` in the same manifest, served at `url` without a `.br`) and the `link`, whose download link is at the site root (installed by the release-pull config) |
 | `android.sign` | `{"keystore": "…", "password": "…", "alias": "…"}`: The unsigned APK is signed here using zipalign and apksigner; the keystore remains on this machine. |
 | `manifest`, `base` | the signed manifest's asset name (default `manifest.json`) and the live manifest it extends (default `<site>/manifest.json`) |
 | `extra` | commands that add the app's own files to the release (`$V15_OUT`, with `V15_BUILD_ID`, `V15_VERSION`, `V15_KEY` (the update key's file), `REMOTE`), such as an older manifest; files left on the builder (all but the APK) are not in `$V15_OUT`: their `v15-sum` lines are in `$V15_OUT/../sums-<platform>` |
@@ -218,7 +218,8 @@ exec bash "$(dirname "$0")/../../v15-build/scripts/publish.sh" "$(dirname "$0")/
    lines), because the keystore never leaves this PC.
 3. **Sign**: Sign the APK with the keystore; sign the exe into the live manifest from its hashes
    (`v15-release add --sha256 --size --br-size`: the signed message is app, platform, build,
-   size and sha256, the same as signing the file), then `v15-release verify` checks that
+   size and sha256, the same as signing the file) and a Linux binary into the same manifest
+   (`--platform linux-x86_64`), then `v15-release verify` checks for each that
    installing the live build would update to this one and that the manifest names the run's
    exe.
 4. **Release**: Create a small GitHub release for each release-pull config, holding only what
