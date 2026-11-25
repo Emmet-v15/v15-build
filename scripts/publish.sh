@@ -91,7 +91,7 @@ if [ -z "$PULLS" ]; then
   for f in "ops/$APP.json" "$DIR/ops/$APP.json" "ops/release-pull/$APP.json"; do [ -f "$f" ] && { PULLS=$f; break; }; done
   [ -n "$PULLS" ] || PULLS="ops/$APP.json"
 fi
-files_of() { cfg "(c.release.$1.files || [])"; }
+files_of() { cfg "(c.release.$1 && c.release.$1.files || [])"; }
 EXE=$(files_of windows | head -1)
 EXE_URL=$(cfg 'c.release.windows && c.release.windows.url || ""')
 [ -n "$EXE" ] && [ -z "$EXE_URL" ] && EXE_URL="$SITE/$EXE"
