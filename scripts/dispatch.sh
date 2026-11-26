@@ -33,7 +33,7 @@ _v15_jobs() {
 # or a lost runner), which may be infrastructure-related and are cheap to
 # retry.
 _v15_app_step() {
-  case "$1" in check | release | encrypt) return 0 ;; esac
+  case "$1" in kit | check | release | encrypt) return 0 ;; esac
   return 1
 }
 

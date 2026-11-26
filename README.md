@@ -26,7 +26,7 @@ requires only the top-level keys (the original form, all optional):
 
 ```json
 {
-  "deps": ["v15-kit", "v15-notify"],
+  "deps": ["v15-kit"],
   "dir": ".",
   "tools": ["nasm"],
   "package": "myapp-app",
@@ -167,6 +167,40 @@ for app in myapp otherapp; do bash ~/projects/v15-build/scripts/test.sh $app || 
 ```
 
 and commit in each that passed.
+
+## The kit's version
+
+Every run first reads which v15-kit the app's Cargo.lock files build with
+(`scripts/kit.sh`, the `kit` step; `publish.sh` runs it in its preflight):
+
+- **Older than the floor fails**: the run, and the release before anything
+  is built. The floor is `FLOOR` in `scripts/kit.sh`, the oldest kit every
+  app must ship with. It moves only for a kit release that every app needs
+  (a security fix, the update protocol, a broken self-update), and moving it
+  stops every app behind it until it is bumped.
+- **A path dependency on a local kit fails**: it builds only on this PC.
+- **Behind the newest kit tag warns** (here, not on the builder, which can't
+  see the kit's tags): the release goes ahead.
+
+Moving apps to a kit release is one command; it fixes each `tag =` (or a
+`rev` or `branch`), Tauri's exact pins, and the Cargo.lock files, for the
+kit alone, then runs the app's tests. It commits nothing:
+
+```bash
+bash ~/projects/v15-build/scripts/bump-kit.sh myapp otherapp            # to the newest tag
+bash ~/projects/v15-build/scripts/bump-kit.sh --to v0.8.0 --no-test myapp
+```
+
+An app with uncommitted Cargo.toml or Cargo.lock changes is skipped.
+
+v15-notify is part of the kit from v0.9.0 (`crates/v15-notify`; v15-shell
+re-exports it as `v15_shell::notify`). Moving to v0.9.0 or later also points a
+dependency on the old `Emmet-v15/v15-notify` at the kit's tag and drops
+`"v15-notify"` from `deps`. A lock that still holds the old repository's copy
+warns, and fails once the kit beside it is v0.9.0 or later (two copies are two
+notification clients, and on Android duplicate JNI symbols). The kit's own
+repository builds its crates by path (it releases the notify host), so its
+locks are not checked.
 
 ## A release
 

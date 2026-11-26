@@ -123,6 +123,10 @@ jobs:
           REF: ${{ inputs.ref }}
           KEY: ${{ secrets[steps.names.outputs.key] }}
         run: bash builder/scripts/source.sh app
+      # the v15-kit its Cargo.lock files build with: older than the floor
+      # (scripts/kit.sh) fails the run before anything is fetched or built
+      - name: kit
+        run: bash builder/scripts/kit.sh src
       # ops/build.json "mask": values excluded from the public log in every
       # case
       - name: mask

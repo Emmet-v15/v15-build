@@ -147,6 +147,17 @@ if [ -f "$KEY" ] && command -v v15-release > /dev/null; then
   [ "$have" = "$PUBKEY" ] || problem "$KEYFILE is the key $have, not release.pubkey $PUBKEY"
 fi
 git grep -q "$PUBKEY" HEAD -- '*.rs' || problem "release.pubkey is not compiled into the app (no .rs file at HEAD holds it)"
+# the v15-kit it builds with (kit.sh): under the floor fails, behind the
+# latest warns
+kit=$(bash "$here/kit.sh" . 2>&1) && kit_ok=1 || kit_ok=0
+while IFS= read -r l; do
+  case "$l" in
+    "kit: warning: "*) warn+=("${l#kit: warning: }") ;;
+    "kit: ok"* | "") ;;
+    *) problem "${l#kit: }" ;;
+  esac
+done <<< "$kit"
+[ "$kit_ok" = 1 ] || [ ${#problems[@]} -gt 0 ] || problem "kit.sh failed"
 
 if [ "$LOCAL" != 1 ] && gh auth status > /dev/null 2>&1; then
   secrets=$(gh secret list --repo "$V15_BUILDER" --json name -q '.[].name' 2>/dev/null | tr -d '\r')
